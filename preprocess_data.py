@@ -56,14 +56,15 @@ class DataConfig:
     def __post_init__(self):
         if self.selected_features is None:
             self.selected_features = [
+                'record_id',
                 "age",
                 "gender",
                 "days_surgery_discharge",
                 "schedule_priority",
                 "duration_of_procedure",
                 "asa",
-                'drg_code', 
-                'icd_prim_code',
+                # 'drg_code', 
+                # 'icd_prim_code',
                 "bmi",
                 "wcc",
                 "hb",
@@ -76,24 +77,25 @@ class DataConfig:
                 "potassium",
                 "inr",
                 "fibrinogen",
-                "cci_ccf",
-                "cci_dementia",
-                "cci_copd",
-                "cci_rheum",
-                "cci_liver_mild",
-                "cci_liver_mod_severe",
-                "cci_diabetes_with",
-                "cci_hemiplegia",
-                "cci_renal_mod_severe",
-                "cci_solid_blood_ca",
-                "cci_metastatic_tumour",
-                "cci_hiv",
+                # "cci_ccf",
+                # "cci_dementia",
+                # "cci_copd",
+                # "cci_rheum",
+                # "cci_liver_mild",
+                # "cci_liver_mod_severe",
+                # "cci_diabetes_with",
+                # "cci_hemiplegia",
+                # "cci_renal_mod_severe",
+                # "cci_solid_blood_ca",
+                # "cci_metastatic_tumour",
+                # "cci_hiv",
+                "cci_total",
                 'hospital_los',
                 'icu_admission_date_and_tim'
             ]
         
         if self.target_columns is None:
-            self.target_columns = ['score1_90', 'score1_180', 'death_flag', 'hospital_los', 'days_death_surgery', 'dd_3month', 'dd_6month', 'age', 'los_target', '180_readmission']
+            self.target_columns = ['hospital_los', 'dd_3month', 'dd_6month', 'los_target', '180_readmission']
 
 class DataProcessor:
     """Class for processing and cleaning medical data"""
@@ -183,6 +185,64 @@ class DataProcessor:
         logger.info(f"\nDataFrame shape after filtering: {df.shape}")
         return df
     
+    def remove_low_variance_features(self, df: pd.DataFrame, exclude_na=True, top_feature_prop_threshold=80):
+        """
+        Removes low-variance features based on:
+        1. Zero variance (only one unique value)
+        2. High dominance of a single value (> threshold %)
+
+        Parameters:
+            df: Input DataFrame
+            exclude_na: Whether to ignore NaN in uniqueness checks
+            top_feature_prop_threshold: % threshold for dominance (e.g., 95 = 95%)
+
+        Returns:
+            Tuple of:
+                - Filtered DataFrame
+                - List of removed columns
+                - List of retained columns
+        """
+        logger.info("Starting low-variance feature filtering...")
+        logger.info(f"DataFrame shape before filtering: {df.shape}")
+
+        df_clean = df.copy()
+        dropped_columns = []
+
+        # Step 1: Remove zero-variance columns (constant values)
+        zero_var_cols = [col for col in df_clean.columns if df_clean[col].nunique(dropna=exclude_na) <= 1]
+        if zero_var_cols:
+            logger.info(f"Removing {len(zero_var_cols)} zero-variance columns: {zero_var_cols}")
+            dropped_columns.extend(zero_var_cols)
+            df_clean = df_clean.drop(columns=zero_var_cols)
+
+            selected_dropped = [col for col in zero_var_cols if col in getattr(self.config, 'selected_features', [])]
+            for col in selected_dropped:
+                logger.warning(f"Selected feature dropped due to zero variance: {col}")
+                logger.warning(f"Unique values: {df[col].unique()} | Value counts:\n{df[col].value_counts()}")
+
+        # Step 2: Remove high-dominance columns
+        dominance_cols = []
+        for col in df_clean.columns:
+            series = df_clean[col].dropna() if exclude_na else df_clean[col]
+            if len(series) == 0:
+                continue
+            top_freq_ratio = series.value_counts(normalize=True).iloc[0] * 100
+            if top_freq_ratio > top_feature_prop_threshold:
+                dominance_cols.append(col)
+                logger.info(f"Dropping column '{col}' due to high dominance ({top_freq_ratio:.2f}%)")
+
+        dropped_columns.extend(dominance_cols)
+        df_clean = df_clean.drop(columns=dominance_cols)
+
+        retained_columns = list(df_clean.columns)
+
+        logger.info(f"DataFrame shape after filtering: {df_clean.shape}")
+        logger.info(f"Total columns dropped: {len(dropped_columns)}")
+        logger.info(f"Remaining columns: {len(retained_columns)}")
+
+        return df_clean, dropped_columns, retained_columns
+
+    
     def remove_outliers(self, df: pd.DataFrame) -> pd.DataFrame:
         """Remove outliers based on configured ranges"""
         if not self.config.invalid_ranges:
@@ -191,15 +251,20 @@ class DataProcessor:
         logger.info("Removing outliers...")
         logger.info(f"DataFrame shape before removing outliers: {df.shape}")
         
+        # Create a copy of the dataframe
+        df_filtered = df.copy()
+        
         for column, (lower, upper) in self.config.invalid_ranges.items():
             if column in df.columns:
+                # Create mask for valid values
                 mask = (df[column] >= lower) & (df[column] <= upper)
-                df = df[mask]
-                removed = len(df) - len(df[mask])
+                # Apply mask to all columns including record_id
+                df_filtered = df_filtered[mask]
+                removed = len(df) - len(df_filtered)
                 logger.info(f"Removed {removed} rows for column {column}")
         
-        logger.info(f"DataFrame shape after removing outliers: {df.shape}")
-        return df
+        logger.info(f"DataFrame shape after removing outliers: {df_filtered.shape}")
+        return df_filtered
     
     def apply_column_transformations(self, df: pd.DataFrame) -> pd.DataFrame:
         """Apply standard transformations to columns"""
@@ -229,22 +294,21 @@ class DataProcessor:
         # Create a copy of the dataframe to avoid modifying the original
         df_imputed = df.copy()
         
-        # Get columns with missing values
+        # Get columns with missing values (exclude record_id)
         missing_columns = df_imputed[self.config.selected_features].columns[
             df_imputed[self.config.selected_features].isnull().any()
         ].tolist()
         
-        if 'death_flag' in missing_columns:
-            missing_columns.remove('death_flag')
+        # Remove record_id from missing_columns if it's there
+        if 'record_id' in missing_columns:
+            missing_columns.remove('record_id')
         
         # Define imputation strategies for different column types
         median_impute_cols = ['age']
         distribution_impute_cols = ['gender']
         calculation_impute_cols = ['bmi']
-        mean_impute_cols = ['days_surgery_discharge', 'duration_of_procedure', 'albumin', 
-                          'potassium', 'inr', 'fibrinogen', 'asa', 'duration_of_time_in_recove', 'sas_score']
-        drop_missing_cols = ['wcc', 'hb', 'haematocrit', 'platelets', 'creatinine', 
-                           'urea', 'sodium', 'albumin', 'inr']
+        mean_impute_cols = ['days_surgery_discharge', 'duration_of_procedure', 'albumin', 'potassium', 'inr', 'fibrinogen', 'asa', 'duration_of_time_in_recove', 'sas_score']
+        drop_missing_cols = ['wcc', 'hb', 'haematocrit', 'platelets', 'creatinine', 'urea', 'sodium', 'albumin', 'inr', 'drg_code', 'icd_prim_code']
         
         # First handle special cases
         for col in missing_columns:
@@ -272,8 +336,8 @@ class DataProcessor:
             
             logger.info(f"DataFrame shape after processing {col}: {df_imputed.shape}")
         
-        # Check for any remaining missing values
-        missing_after = df_imputed[self.config.selected_features].isnull().mean()
+        # Check for any remaining missing values (excluding record_id)
+        missing_after = df_imputed[self.config.selected_features].drop(columns=['record_id']).isnull().mean()
         if any(missing_after > 0):
             logger.warning(f"Some missing values remain after imputation:\n{missing_after}")
         else:
@@ -494,8 +558,7 @@ class DataProcessor:
                 # Binary columns (2 unique values)
                 n_unique == 2 or
                 # Low cardinality categorical columns
-                (n_unique <= self.config.max_unique_values_for_categorical and 
-                 n_unique >= self.config.min_unique_values_for_categorical and
+                (n_unique >= self.config.min_unique_values_for_categorical and
                  (is_categorical_type or is_categorical_name or is_uniform_distribution)) or
                 # Explicitly categorical columns
                 is_categorical_type
@@ -524,6 +587,9 @@ class DataProcessor:
         
         # Automatically detect categorical columns
         categorical_cols = self.detect_categorical_columns(df)
+        
+        # Filter categorical columns to only include those in the current dataframe
+        categorical_cols = [col for col in categorical_cols if col in df.columns]
         
         if not categorical_cols:
             logger.info("No categorical columns to encode")
@@ -609,7 +675,7 @@ class DataProcessor:
         logger.info(f"Final DataFrame shape after encoding: {df_encoded.shape}")
         return df_encoded
 
-    def scale_numerical_features(self, df: pd.DataFrame) -> pd.DataFrame:
+    def scale_numerical_features(self, df: pd.DataFrame, categorical_cols: List[str]) -> pd.DataFrame:
         """Scale numerical features using StandardScaler"""
         logger.info("Scaling numerical features...")
         logger.info(f"DataFrame shape before scaling: {df.shape}")
@@ -617,11 +683,14 @@ class DataProcessor:
         # Create a copy of the dataframe
         df_scaled = df.copy()
         
+        # Detect categorical columns
+        # categorical_cols = self.detect_categorical_columns(df)
+        
         # Identify numerical columns
         numerical_cols = [col for col in df.columns 
-                        if col not in self.config.categorical_columns 
+                        if col not in categorical_cols 
                         and col != 'record_id' 
-                        and col != self.config.target_columns
+                        and col not in self.config.target_columns
                         and pd.api.types.is_numeric_dtype(df[col])]
         
         if not numerical_cols:
@@ -657,23 +726,390 @@ class DataProcessor:
             logger.error(f"Error in scaling numerical features: {str(e)}")
             raise
 
+    def convert_categorical_to_numeric(self, X):
+        """
+        Converts all categorical (non-numeric) columns in the DataFrame to numeric using encoding.
+        - For categorical columns, uses Label Encoding or One-Hot Encoding depending on the type of variable.
+
+        Parameters:
+        -----------
+        X : pandas.DataFrame
+            The feature matrix containing categorical and numeric features.
+
+        Returns:
+        --------
+        X_encoded : pandas.DataFrame
+            DataFrame with all categorical variables converted to numeric format.
+        """
+        print("Categorical columns:")
+        print(X.select_dtypes(include=['object', 'category']).columns)
+        # Iterate over columns to identify categorical features
+        for col in X.select_dtypes(include=['object', 'category']).columns:
+            print(col)
+            # If the column has more than 2 unique values, we apply One-Hot Encoding
+            if X[col].nunique() > 2:
+                print(f"Applying One-Hot Encoding to '{col}'")
+                X = pd.get_dummies(X, columns=[col], drop_first=True)
+            else:
+                # Apply Label Encoding for binary categorical columns
+                print(f"Applying Label Encoding to '{col}'")
+                X[col] = X[col].astype('category').cat.codes
+        
+        return X
+    
     def preprocess_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Preprocess features including encoding categorical variables"""
         logger.info("Preprocessing features...")
         
-        # Apply standard preprocessing
-        df = self.filter_zero_variance_columns(df)
-        df = self.remove_outliers(df)
+        # 1. Apply column transformations first
         df = self.apply_column_transformations(df)
+        if 'record_id' not in df.columns:
+            raise ValueError("record_id column missing after column transformations")
+        logger.info("Applied column transformations")
+        
+        # 2. Remove outliers
+        df = self.remove_outliers(df)
+        if 'record_id' not in df.columns:
+            raise ValueError("record_id column missing after removing outliers")
+        logger.info("Removed outliers")
+        
+        # 3. Impute missing data
         df = self.impute_missing_data(df)
+        if 'record_id' not in df.columns:
+            raise ValueError("record_id column missing after imputation")
+        logger.info("Imputed missing data")
         
-        # Encode categorical features
-        df = self.encode_categorical_features(df)
+        # 4. Filter zero variance columns after transformations and imputation
+        df = self.filter_zero_variance_columns(df)
+        if 'record_id' not in df.columns:
+            raise ValueError("record_id column missing after filtering zero variance columns")
+        logger.info("Filtered zero variance columns")
         
-        # Scale numerical features
-        df = self.scale_numerical_features(df)
+        # 5. Select only the features we want (after all cleaning steps)
+        # First check which selected features are actually in the dataframe
+        available_features = [col for col in self.config.selected_features if col in df.columns]
+        missing_features = set(self.config.selected_features) - set(available_features)
+        if missing_features:
+            logger.warning(f"\nThe following selected features are not available in the dataframe and will be skipped: {missing_features}")
+        
+        # Update selected_features to only include available columns
+        self.config.selected_features = available_features
+        df = df[self.config.selected_features]
+        if 'record_id' not in df.columns:
+            raise ValueError("record_id column missing after feature selection")
+        logger.info(f"Selected {len(self.config.selected_features)} features")
+        
+        df = self.convert_categorical_to_numeric(df)
+        
+        # df = self.encode_categorical_features(df)
+        # # 6. Encode categorical features
+        # df = self.encode_categorical_features(df)
+        # if 'record_id' not in df.columns:
+        #     raise ValueError("record_id column missing after categorical encoding")
+        # logger.info("Encoded categorical features")
+        
+        # # 7. Scale numerical features
+        # df = self.scale_numerical_features(df)
+        # if 'record_id' not in df.columns:
+        #     raise ValueError("record_id column missing after numerical scaling")
+        # logger.info("Scaled numerical features")
         
         return df
+    
+    def has_value_in_columns(self, df, columns):
+        """
+        Check if there are non-null values in the specified columns.
+        
+        Parameters:
+        -----------
+        df : pandas.DataFrame
+            DataFrame to check columns in
+        columns : list
+            List of column names to check
+            
+        Returns:
+        --------
+        pandas.Series
+            Boolean series indicating whether each row has any non-null values in the specified columns
+        """
+        valid_cols = [col for col in columns if col in df.columns]
+        if not valid_cols:
+            return pd.Series(False, index=df.index)
+        return df[valid_cols].notna().any(axis=1)
+    
+    # Add various disease multiclass feature creation methods
+    def create_heart_failure_multiclass(self, df_index, df_index_selected, columns):
+        """
+        Create multiclass features for heart failure.
+        
+        Parameters:
+        -----------
+        df_index : pandas.DataFrame
+            Original DataFrame containing index events
+        df_index_selected : pandas.DataFrame
+            DataFrame storing processed features
+        columns : list
+            List of columns related to heart failure
+        """
+        print("Creating heart failure multiclass features...")
+        
+        # Define columns related to specific categories
+        nyha_columns = [col for col in columns if 'nyha' in col.lower()]
+        
+        # Initialize multiclass feature
+        df_index_selected['heart_failure_class'] = 0
+        
+        # First mark all heart failure records as unspecified (1)
+        mask_hf = self.has_value_in_columns(df_index, columns)
+        df_index_selected.loc[mask_hf, 'heart_failure_class'] = 1
+        
+        # NYHA Class I (2)
+        mask_nyha1 = self.has_value_in_columns(df_index, [col for col in nyha_columns if 'i' in col.lower() and 'ii' not in col.lower()])
+        df_index_selected.loc[mask_nyha1, 'heart_failure_class'] = 2
+        
+        # NYHA Class II (3)
+        mask_nyha2 = self.has_value_in_columns(df_index, [col for col in nyha_columns if 'ii' in col.lower() and 'iii' not in col.lower()])
+        df_index_selected.loc[mask_nyha2, 'heart_failure_class'] = 3
+        
+        # NYHA Class III (4)
+        mask_nyha3 = self.has_value_in_columns(df_index, [col for col in nyha_columns if 'iii' in col.lower() and 'iv' not in col.lower()])
+        df_index_selected.loc[mask_nyha3, 'heart_failure_class'] = 4
+        
+        # NYHA Class IV (5)
+        mask_nyha4 = self.has_value_in_columns(df_index, [col for col in nyha_columns if 'iv' in col.lower()])
+        df_index_selected.loc[mask_nyha4, 'heart_failure_class'] = 5
+        
+        # Output distribution
+        class_counts = df_index_selected['heart_failure_class'].value_counts().sort_index()
+        print("Heart failure class distribution:")
+        for cls, count in class_counts.items():
+            print(f"  Class {cls}: {count} rows")
+    
+    def create_hypertension_multiclass(self, df_index, df_index_selected, columns):
+        """
+        Create multiclass features for hypertension.
+        
+        Parameters:
+        -----------
+        df_index : pandas.DataFrame
+            Original DataFrame containing index events
+        df_index_selected : pandas.DataFrame
+            DataFrame storing processed features
+        columns : list
+            List of columns related to hypertension
+        """
+        print("Creating hypertension multiclass features...")
+        
+        # Define columns related to treatment
+        treated_columns = [col for col in columns if 'treated' in col.lower()]
+        untreated_columns = [col for col in columns if 'untreated' in col.lower()]
+        partially_treated_columns = [col for col in columns if 'partially' in col.lower()]
+        
+        # Initialize multiclass feature
+        df_index_selected['hypertension_class'] = 0
+        
+        # First mark all hypertension records as unspecified (1)
+        mask_htn = self.has_value_in_columns(df_index, columns)
+        df_index_selected.loc[mask_htn, 'hypertension_class'] = 1
+        
+        # Treated hypertension (2)
+        mask_treated = self.has_value_in_columns(df_index, treated_columns)
+        df_index_selected.loc[mask_treated, 'hypertension_class'] = 2
+        
+        # Untreated hypertension (3)
+        mask_untreated = self.has_value_in_columns(df_index, untreated_columns)
+        df_index_selected.loc[mask_untreated, 'hypertension_class'] = 3
+        
+        # Partially treated hypertension (4)
+        mask_partial = self.has_value_in_columns(df_index, partially_treated_columns)
+        df_index_selected.loc[mask_partial, 'hypertension_class'] = 4
+        
+        # Output distribution
+        class_counts = df_index_selected['hypertension_class'].value_counts().sort_index()
+        print("Hypertension class distribution:")
+        for cls, count in class_counts.items():
+            print(f"  Class {cls}: {count} rows")
+
+    def create_heart_disease_multiclass(self, df_index, df_index_selected, columns):
+        """
+        Create multiclass features for heart disease.
+        
+        Parameters:
+        -----------
+        df_index : pandas.DataFrame
+            Original DataFrame containing index events
+        df_index_selected : pandas.DataFrame
+            DataFrame storing processed features
+        columns : list
+            List of columns related to heart disease
+        """
+        print("Creating heart disease multiclass features...")
+        
+        # Define columns related to specific categories
+        angina_columns = [col for col in columns if 'angina' in col.lower()]
+        ccs_columns = [col for col in columns if 'ccs' in col.lower()]
+        
+        # Initialize multiclass feature
+        df_index_selected['heart_disease_class'] = 0
+        
+        # First mark all heart disease records as unspecified (1)
+        mask_hd = self.has_value_in_columns(df_index, columns)
+        df_index_selected.loc[mask_hd, 'heart_disease_class'] = 1
+        
+        # No angina (2)
+        mask_no_angina = self.has_value_in_columns(df_index, [col for col in angina_columns if 'no_angina' in col.lower()])
+        df_index_selected.loc[mask_no_angina, 'heart_disease_class'] = 2
+        
+        # CCS Class I (3)
+        mask_ccs1 = self.has_value_in_columns(df_index, [col for col in ccs_columns if 'i' in col.lower() and 'ii' not in col.lower()])
+        df_index_selected.loc[mask_ccs1, 'heart_disease_class'] = 3
+        
+        # CCS Class II (4)
+        mask_ccs2 = self.has_value_in_columns(df_index, [col for col in ccs_columns if 'ii' in col.lower() and 'iii' not in col.lower()])
+        df_index_selected.loc[mask_ccs2, 'heart_disease_class'] = 4
+        
+        # CCS Class III (5)
+        mask_ccs3 = self.has_value_in_columns(df_index, [col for col in ccs_columns if 'iii' in col.lower() and 'iv' not in col.lower()])
+        df_index_selected.loc[mask_ccs3, 'heart_disease_class'] = 5
+        
+        # CCS Class IV (6)
+        mask_ccs4 = self.has_value_in_columns(df_index, [col for col in ccs_columns if 'iv' in col.lower()])
+        df_index_selected.loc[mask_ccs4, 'heart_disease_class'] = 6
+        
+        # Output distribution
+        class_counts = df_index_selected['heart_disease_class'].value_counts().sort_index()
+        print("Heart disease class distribution:")
+        for cls, count in class_counts.items():
+            print(f"  Class {cls}: {count} rows")
+    
+    def create_diabetes_multiclass(self, df_index, df_index_selected, columns):
+        """
+        Create multiclass features for diabetes.
+        
+        Parameters:
+        -----------
+        df_index : pandas.DataFrame
+            Original DataFrame containing index events
+        df_index_selected : pandas.DataFrame
+            DataFrame storing processed features
+        columns : list
+            List of columns related to diabetes
+        """
+        print("Creating diabetes multiclass features...")
+        
+        # Define columns related to specific types
+        type1_columns = [col for col in columns if 'type1' in col.lower()]
+        type2_columns = [col for col in columns if 'type2' in col.lower()]
+        complication_columns = [col for col in columns if 'end_organ_damage' in col.lower()]
+        
+        # Initialize multiclass feature
+        df_index_selected['diabetes_class'] = 0
+        
+        # First mark all diabetes records as unspecified (1)
+        mask_diabetes = self.has_value_in_columns(df_index, columns)
+        df_index_selected.loc[mask_diabetes, 'diabetes_class'] = 1
+        
+        # Type 1 diabetes (2)
+        mask_type1 = self.has_value_in_columns(df_index, type1_columns)
+        df_index_selected.loc[mask_type1, 'diabetes_class'] = 2
+        
+        # Type 2 diabetes (3)
+        mask_type2 = self.has_value_in_columns(df_index, type2_columns)
+        df_index_selected.loc[mask_type2, 'diabetes_class'] = 3
+        
+        # Diabetes with complications (4)
+        mask_complications = self.has_value_in_columns(df_index, complication_columns)
+        df_index_selected.loc[mask_complications & mask_diabetes, 'diabetes_class'] = 4
+        
+        # Output distribution
+        class_counts = df_index_selected['diabetes_class'].value_counts().sort_index()
+        print("Diabetes class distribution:")
+        for cls, count in class_counts.items():
+            print(f"  Class {cls}: {count} rows")
+
+    def create_cancer_multiclass(self, df_index, df_index_selected, columns):
+        """
+        Create multiclass features for cancer.
+        
+        Parameters:
+        -----------
+        df_index : pandas.DataFrame
+            Original DataFrame containing index events
+        df_index_selected : pandas.DataFrame
+            DataFrame storing processed features
+        columns : list
+            List of columns related to cancer
+        """
+        print("Creating cancer multiclass features...")
+        
+        # Define columns related to specific types
+        unspecified_columns = [col for col in columns if 'unspecified' in col.lower()]
+        primary_columns = [col for col in columns if 'primary' in col.lower() or 'localised' in col.lower()]
+        metastatic_columns = [col for col in columns if 'metastatic' in col.lower() or 'secondary' in col.lower() or 'mets' in col.lower()]
+        
+        # Initialize multiclass feature
+        df_index_selected['cancer_class'] = 0
+        
+        # First mark all cancer records as unspecified (1)
+        mask_cancer = self.has_value_in_columns(df_index, columns)
+        df_index_selected.loc[mask_cancer, 'cancer_class'] = 1
+        
+        # Primary/localized cancer (2)
+        mask_primary = self.has_value_in_columns(df_index, primary_columns)
+        df_index_selected.loc[mask_primary, 'cancer_class'] = 2
+        
+        # Metastatic cancer (3)
+        mask_metastatic = self.has_value_in_columns(df_index, metastatic_columns)
+        df_index_selected.loc[mask_metastatic, 'cancer_class'] = 3
+        
+        # Output distribution
+        class_counts = df_index_selected['cancer_class'].value_counts().sort_index()
+        print("Cancer class distribution:")
+        for cls, count in class_counts.items():
+            print(f"  Class {cls}: {count} rows")
+    
+    def create_cerebrovascular_multiclass(self, df_index, df_index_selected, columns):
+        """
+        Create multiclass features for cerebrovascular disease.
+        
+        Parameters:
+        -----------
+        df_index : pandas.DataFrame
+            Original DataFrame containing index events
+        df_index_selected : pandas.DataFrame
+            DataFrame storing processed features
+        columns : list
+            List of columns related to cerebrovascular disease
+        """
+        print("Creating cerebrovascular disease multiclass features...")
+        
+        # Define columns related to specific types
+        stroke_columns = [col for col in columns if 'stroke' in col.lower()]
+        tia_columns = [col for col in columns if 'tia' in col.lower()]
+        
+        # Initialize multiclass feature
+        df_index_selected['cerebrovascular_class'] = 0
+        
+        # First mark all cerebrovascular disease records as unspecified (1)
+        mask_cerebrovascular = self.has_value_in_columns(df_index, columns)
+        df_index_selected.loc[mask_cerebrovascular, 'cerebrovascular_class'] = 1
+        
+        # Stroke (2)
+        mask_stroke = self.has_value_in_columns(df_index, stroke_columns)
+        df_index_selected.loc[mask_stroke, 'cerebrovascular_class'] = 2
+        
+        # Transient Ischemic Attack (TIA) (3)
+        mask_tia = self.has_value_in_columns(df_index, tia_columns)
+        df_index_selected.loc[mask_tia, 'cerebrovascular_class'] = 3
+        
+        # Both stroke and TIA (4)
+        df_index_selected.loc[mask_stroke & mask_tia, 'cerebrovascular_class'] = 4
+        
+        # Output distribution
+        class_counts = df_index_selected['cerebrovascular_class'].value_counts().sort_index()
+        print("Cerebrovascular disease class distribution:")
+        for cls, count in class_counts.items():
+            print(f"  Class {cls}: {count} rows")
     
     def load_target_feature(self) -> pd.DataFrame:
         """
@@ -704,7 +1140,8 @@ class DataProcessor:
         available_columns = ['record_id']
         
         # Add target columns based on what's available
-        target_columns = ['score1_90', 'score1_180', 'death_flag']
+        target_columns = ['dd_3month', 'dd_6month', 'los_target', '180_readmission']
+
         for col in target_columns:
             if col in target_features.columns:
                 available_columns.append(col)
@@ -730,8 +1167,55 @@ class DataProcessor:
         """Main processing pipeline"""
         try:
             # Load and process data
-            df = self.load_data()
-            df = self.preprocess_features(df)
+            df_index = self.load_data()
+            df_index_selected = self.preprocess_features(df_index)
+            
+            # Check if there are relevant columns in the dataset and create multiclass features
+            # Heart failure multiclass features
+            hf_cols = [col for col in df_index.columns if 'heart_failure' in col.lower() or 'nyha' in col.lower()]
+            if hf_cols:
+                self.create_heart_failure_multiclass(df_index, df_index_selected, hf_cols)
+            
+            # Hypertension multiclass features
+            htn_cols = [col for col in df_index.columns if 'hypertension' in col.lower() or 'htn' in col.lower()]
+            if htn_cols:
+                self.create_hypertension_multiclass(df_index, df_index_selected, htn_cols)
+            
+            # Heart disease multiclass features
+            hd_cols = [col for col in df_index.columns if ('heart_disease' in col.lower() or 'angina' in col.lower() or 'ccs' in col.lower()) and 'failure' not in col.lower()]
+            if hd_cols:
+                self.create_heart_disease_multiclass(df_index, df_index_selected, hd_cols)
+            
+            # Diabetes multiclass features
+            dm_cols = [col for col in df_index.columns if 'diabetes' in col.lower() or 'dm' in col.lower()]
+            if dm_cols:
+                self.create_diabetes_multiclass(df_index, df_index_selected, dm_cols)
+            
+            # Cancer multiclass features
+            cancer_cols = [col for col in df_index.columns if 'cancer' in col.lower() or 'tumor' in col.lower() or 'metastatic' in col.lower()]
+            if cancer_cols:
+                self.create_cancer_multiclass(df_index, df_index_selected, cancer_cols)
+            
+            # Cerebrovascular disease multiclass features
+            cerebro_cols = [col for col in df_index.columns if 'cerebrovascular' in col.lower() or 'stroke' in col.lower() or 'tia' in col.lower()]
+            if cerebro_cols:
+                self.create_cerebrovascular_multiclass(df_index, df_index_selected, cerebro_cols)
+        
+            icdpreprocessor = IcdsPreprocessing()
+        
+            df_icd_transformed = icdpreprocessor.preprocess_icd_data(df_index)
+            disease_present_columns = [col for col in df_icd_transformed.columns if col.endswith('_disease_present')] + ['record_id']
+            
+            
+            df_index_selected = pd.merge(df_index_selected, df_icd_transformed[disease_present_columns], on='record_id', how='left')
+            
+            print(df_index_selected.columns)
+            # Load and integrate target features if available
+            target_features = self.load_target_feature()
+            if target_features is not None:
+                logger.info("Integrating target features with main dataset...")
+                df = pd.merge(df_index_selected, target_features, on='record_id', how='left')
+                logger.info(f"Dataset shape after integrating target features: {df.shape}")
             
             # Save processed data
             timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
