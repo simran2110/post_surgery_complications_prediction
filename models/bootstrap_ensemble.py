@@ -3,7 +3,7 @@ Bootstrap Ensemble implementation for model training.
 """
 import numpy as np
 import pandas as pd
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 import logging
 from sklearn.base import BaseEstimator
 from .random_forest_model import RandomForestModel
@@ -16,7 +16,9 @@ class BootstrapEnsemble:
         n_models: int = 10,
         base_model_class: Any = RandomForestModel,
         params_file: Optional[str] = None,
-        random_state: Optional[int] = None
+        random_state: Optional[int] = None,
+        model_params: Optional[Dict] = None,
+        **kwargs
     ):
         """
         Initialize Bootstrap Ensemble
@@ -31,11 +33,17 @@ class BootstrapEnsemble:
             Path to parameters file
         random_state : int, optional
             Random seed for reproducibility
+        model_params : dict, optional
+            Parameters to use for each base model
+        **kwargs : dict
+            Additional parameters for the base model
         """
         self.n_models = n_models
         self.base_model_class = base_model_class
         self.params_file = params_file
         self.random_state = random_state
+        self.model_params = model_params or {}
+        self.kwargs = kwargs
         self.models: List[BaseEstimator] = []
         self.feature_names_ = None
         
@@ -70,8 +78,8 @@ class BootstrapEnsemble:
             logger.info(f"Bootstrap sample size: {len(indices)}")
             logger.info(f"Out-of-bag sample size: {len(oob_indices)}")
             
-            # Train model on bootstrap sample
-            model = self.base_model_class(params_file=self.params_file)
+            # Create and train a new model for each bootstrap sample
+            model = self.base_model_class(params_file=self.params_file, **self.model_params)
             model.fit(X_boot, y_boot)
             
             # Evaluate on out-of-bag samples if available

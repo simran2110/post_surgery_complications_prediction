@@ -7,24 +7,9 @@ from datetime import datetime
 class IcdsPreprocessing:
     def __init__(self):
         self.icd_pac_columns = {
-            "hypertension":{
-                "pac":["hypertension_pac"],
-                "icd":["hypertension_icd"],
-            },
-            "ischaemic_heart_disease":{
-                "pac":["ischaemic_heart_disease"],
-                "icd":["ischaemic_heart_disease_icd"],
-            },
-            "heart_failure":{
-                "pac":["heart_failure_pac"],
-                "icd":["heart_failur_icd_10"],
-            },
-            "valvular_heart_disease":{
-                "pac":["valvular_heart_pac"],
-                "icd":["valvular_heart_disease_icd"],
-            },
             "atrial_fibrillation":{
                 "pac":["af_pac"],
+                # "pac":[],
                 "icd":["atrial_fibrillation_icd"],
             },
             "cardiac_transplant":{
@@ -59,13 +44,17 @@ class IcdsPreprocessing:
                 "pac":["lung_transplant_pac"],
                 "icd":["lung_transplant_icd"]
             },
+            "smoking":{
+                "pac":["current_smoker_pac", "ex_smoker_pac"],
+                "icd":["smoking_icd"]
+            },
             "other_respiratory":{
                 "pac":["other_respiratory_pac"],
                 "icd":["other_respiratory_icd"]   
             },
             "cerebrovascular":{
                 "pac":["cerebrovascular_pac"],
-                "icd":["cerebrovascular_icd"]   
+                "icd":["cerebrovascular_icd"]
             },
             "dementia":{
                 "pac":["dementia_pac"],
@@ -75,18 +64,20 @@ class IcdsPreprocessing:
                 "pac":["hemiplegia_pac"],
                 "icd":["hemiplegia_icd"]   
             },
-            "type1_diabetes":{
-                "pac":["type1_pac"],
-                "icd":["type1_without_icd", "type1_with_icd"]   
-            },
-            "type2_diabetes":{
-                "pac":['type2_pac'],
-                "icd":["type2_with_icd", 'type2_without_icd', 'type2_insulin_icd']   
-            },
             "endocrine":{
                 "pac":["endocrine_pac"],
                 "icd":["endocrine_icd"]   
             },
+            "type1_diabetes":{
+                "icd":["type1_with_icd", "type1_without_icd"],
+                "pac":["type1_pac"]
+            },
+            # "type2_diabetes":{
+            #     "icd":["type2_with_icd", "type2_without_icd", "type2_insulin_icd"],
+            #     "pac":[
+            #         "type2_pac"
+            #     ]
+            # },
             "metabolic":{
                 "pac":["metabolic_pac"],
                 "icd":["metabolic_icd"]   
@@ -207,26 +198,6 @@ class IcdsPreprocessing:
                 "icd":["myocardial_infarction_icd"],
                 "pac":[]
             },
-            "cancer_unspecified": {
-                "icd":[],
-                "pac":["cancer_unspecified_pac"]
-            },
-            "cancer_primary": {
-                "icd":["cancer_primary_icd"],
-                "pac":[]
-            },
-            "cancer_secondary": {
-                "icd":["cancer_secondary_icd"],
-                "pac":[]
-            },
-            "cancer_metastatic": {
-                "icd":[],
-                "pac":["cancer_metastatic_pac"]
-            },
-            "cancer_metastatic": {
-                "icd":[],
-                "pac":["cancer_localised_pac"]
-            },
             "anaemia":{
                 "icd":[],
                 "pac":["anaemia"]
@@ -251,7 +222,46 @@ class IcdsPreprocessing:
                 "icd":[],
                 "pac":["leukaemia_myeloma_icu"]
             },
-            
+            "ischaemic_heart_disease":{
+                "icd":["ischaemic_heart_disease_icd"],
+                "pac":["ischaemic_heart_disease"]
+            },
+            "heart_failure":{
+                "icd":[],
+                "pac":[]
+            },
+            "heart_failure":{
+                "icd":["heart_failur_icd_10"],
+                "pac":["heart_failure_pac", "heart_failure_pac_powerfor"]
+            },
+            "valvular_heart":{
+                "icd":["valvular_heart_disease_icd"],
+                "pac":["valvular_heart_pac", "valvular_heart_disease_pac"]
+            },
+            "living_alone":{
+                "icd":["living_alone_icd"],
+                "pac":[]
+            },
+            "acute_renal_failure":{
+                "icd":["acute_renal_failure_icd_10"],
+                "pac":[]
+            },
+            "hypertension":{
+                "icd":["hypertension_icd"],
+                "pac":["hypertension_pac"]
+            },
+            "dialysis":{
+                "icd":["dialysis_icd"],
+                "pac":["haemodialysis", "peritoneal_dialysis"]
+            },
+            "cancer":{
+                "icd":["cancer_primary_icd", "cancer_secondary_icd"],
+                "pac":["cancer_unspecified_pac", "cancer_localised_pac", "cancer_metastatic_pac"]
+            },
+            "gastrointestinal":{
+                "icd":["gastrointestinal_icd"],
+                "pac":[]
+            }
             
         }
     
@@ -265,9 +275,10 @@ class IcdsPreprocessing:
         df = pd.read_csv(csv_filename, low_memory=False)
 
         # Filter for index events
-        self.midas_df = df[df["redcap_event_name"].str.contains("index")]
-        print(f"Dataset loaded successfully for index events: {self.midas_df.shape}")
-                
+        df = df[df["redcap_event_name"].str.contains("index")]
+        print(f"Dataset loaded successfully for index events: {df.shape}")
+        return df
+
     def check_disease_present(self, df, disease_name, pac_columns, icd_columns):
         """
         Mark rows as 1 if disease is present based on any PAC or ICD columns, otherwise 0.
@@ -306,9 +317,11 @@ class IcdsPreprocessing:
             print(f"Columns after filtering zero variance column is {len(df.columns)}")
         else:
             print("No column with zero variance")
-            
+          
+        filtered_columns = self.calc_non_low_variance_features(df)
+        print(f"Columns after filtering low variance columns are {len(filtered_columns)}")
         
-        return df
+        return df[filtered_columns]
 
     def calc_non_low_variance_features(self, df, exclude_na=True, top_feature_prop_threshold=19):
         df_clean = df.copy()
@@ -418,10 +431,15 @@ def main():
     csv_filename = "MIDASCDWH_DATA_2024-11-12_1309.csv"
     output_file = "MIDAS_preprocessed_icds_" + datetime.now().strftime('%Y-%m-%d-%H-%M-%S') + '.csv'
     
-    icdpreprocessor = IcdsPreprocessing(csv_filename, output_file)
-    icdpreprocessor.preprocess_icd_data()
-   
+    icdpreprocessor = IcdsPreprocessing()
+    df = icdpreprocessor.load_dataset(csv_filename)
+    df = icdpreprocessor.preprocess_icd_data(df)
+    df = icdpreprocessor.filter_low_variance_columns(df)
+    print(f"Columns after filtering low variance columns are {df.columns}")
     
+    # Save the processed data
+    df.to_csv(output_file, index=False)
+    print(f"Processed data saved to {output_file}")
 
 if __name__ == "__main__":
     main() 

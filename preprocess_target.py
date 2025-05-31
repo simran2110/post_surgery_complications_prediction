@@ -134,6 +134,8 @@ class WHODASProcessor:
         # Create los_target based on age groups
         df_outcome = self._create_los_target(df_outcome)
         
+        df_outcome['icu_admission_date_and_tim'] = df_outcome['icu_admission_date_and_tim'].fillna(0).astype(int)
+        
         return df_outcome
     
     def _create_los_target(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -277,9 +279,9 @@ class WHODASProcessor:
         self.df_whodas = self.df_whodas[['record_id', 'score1', 'score1_90', 'score1_180']]
         
         # Add hospital_los data
-        hospital_los_data = self.df[self.df["redcap_event_name"].str.contains("index")][['record_id', 'hospital_los']]
-        self.df_whodas = pd.merge(self.df_whodas, hospital_los_data, on='record_id', how='left')
         
+        hospital_los_data = self.df[self.df["redcap_event_name"].str.contains("index")][['record_id', 'hospital_los', 'icu_admission_date_and_tim']]
+        self.df_whodas = pd.merge(self.df_whodas, hospital_los_data, on='record_id', how='left')
         
         # Add death data
         death_data = self.df[self.df["redcap_event_name"].str.contains("index")][['record_id', 'days_death_surgery']]
@@ -330,6 +332,8 @@ class WHODASProcessor:
                    f"({self.final_df['los_target'].sum()/len(self.final_df)*100:.2f}%)")
         logger.info(f"180-day readmission count: {self.final_df['180_readmission'].sum()} "
                    f"({self.final_df['180_readmission'].sum()/len(self.final_df)*100:.2f}%)")
+        logger.info(f"ICU admission count: {self.final_df['icu_admission_date_and_tim'].sum()} "
+                   f"({self.final_df['icu_admission_date_and_tim'].sum()/len(self.final_df)*100:.2f}%)")
     
     def _save_results(self):
         """Save results to CSV"""

@@ -21,10 +21,11 @@ def load_data(data_dir, target_column):
     logger.info("🔄 Loading data from %s", data_dir)
     train_data = pd.read_csv(Path(data_dir) / 'train.csv')
     test_data = pd.read_csv(Path(data_dir) / 'test.csv')
+    val_data = pd.read_csv(Path(data_dir) / 'val.csv')
     
     logger.info("📊 Train data shape: %s", train_data.shape)
     logger.info("📊 Test data shape: %s", test_data.shape)
-    
+    logger.info("📊 Val data shape: %s", val_data.shape)
     # Load feature info
     logger.info("📝 Loading feature information...")
     with open(Path(data_dir) / 'split_info.json', 'r') as f:
@@ -37,9 +38,11 @@ def load_data(data_dir, target_column):
     y_train = train_data[target_column]
     X_test = test_data[feature_columns]
     y_test = test_data[target_column]
+    X_val = val_data[feature_columns]
+    y_val = val_data[target_column]
     
     logger.info("✅ Data loading complete")
-    return X_train, y_train, X_test, y_test
+    return X_train, y_train, X_test, y_test, X_val, y_val
 
 def save_model_results(metrics, output_dir, model_name):
     """Save model evaluation results"""
@@ -53,7 +56,7 @@ def save_model_results(metrics, output_dir, model_name):
     
     logger.info(f"Results saved to {results_file}")
 
-def train_and_save_model(model_class, params_file, X_train, y_train, X_test, y_test, output_dir, model_name):
+def train_and_save_model(model_class, params_file, X_train, y_train, X_test, y_test, X_val, y_val, output_dir, model_name):
     """Train and save a model"""
     logger.info("🚀 Starting training for %s...", model_name)
     
@@ -67,7 +70,7 @@ def train_and_save_model(model_class, params_file, X_train, y_train, X_test, y_t
     
     # Training with validation data
     logger.info("🏋️ Training model...")
-    model.fit(X_train, y_train, validation_data=(X_test, y_test))
+    model.fit(X_train, y_train, test_data=(X_test, y_test), validation_data=(X_val, y_val))
     
     # Evaluate model
     logger.info("📊 Evaluating model...")
@@ -109,12 +112,12 @@ def main():
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     
     # Load data
-    X_train, y_train, X_test, y_test = load_data(args.data_dir, args.target_column)
+    X_train, y_train, X_test, y_test, X_val, y_val = load_data(args.data_dir, args.target_column)
     
     # Train models
     models = {
         'random_forest': (RandomForestModel, 'random_forest_params.json'),
-        # 'gam': (GAMModel, 'gam_params.json'),
+        'gam': (GAMModel, 'gam_params.json'),
         # 'logistic_regression': (LogisticRegressionModel, 'logistic_regression_params.json')
     }
     
@@ -132,7 +135,9 @@ def main():
                     X_train,
                     y_train,
                     X_test,
-                    y_test,
+                    y_test, 
+                    X_val,
+                    y_val,
                     args.output_dir,
                     model_name
                 )

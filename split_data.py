@@ -47,7 +47,8 @@ def split_data(
 ) -> None:
     """
     Split data into train, validation, and test sets with balanced distribution.
-    Creates separate directories for each target variable.
+    Creates separate directories for each target variable, with independent splits for each target.
+    For each target, other target columns are excluded from the feature set.
     
     Args:
         data_path: Path to the input data file
@@ -58,6 +59,8 @@ def split_data(
         random_state: Random seed for reproducibility
         stratify: Whether to stratify the split based on target variables
     """
+    print(target_columns)
+    print(data_path)
     # Create output directory
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -66,107 +69,142 @@ def split_data(
     logger.info(f"Loading data from {data_path}")
     data = pd.read_csv(data_path)
     
-    # Separate features and targets
-    X = data.drop(columns=target_columns)
-    y = data[target_columns]
+    # Remove record_id if it exists
+    if 'record_id' in data.columns:
+        logger.info("Removing record_id column")
+        data = data.drop('record_id', axis=1)
+    target_columns = [col for col in target_columns if col in data.columns]
     
-    # Check class distributions and decide on stratification
-    if stratify:
-        logger.info("Checking class distributions for stratification...")
-        class_distributions = {}
-        can_stratify = True
-        
-        for target in target_columns:
-            value_counts = data[target].value_counts()
-            class_distributions[target] = value_counts
-            
-            # Check if any class has less than 2 samples
-            if value_counts.min() < 2:
-                logger.warning(f"\nTarget '{target}' has classes with insufficient samples:")
-                for val, count in value_counts.items():
-                    logger.warning(f"  Class {val}: {count} samples")
-                can_stratify = False
-        
-        if not can_stratify:
-            logger.warning("\nDisabling stratification due to insufficient samples in some classes.")
-            logger.warning("Proceeding with random splitting to ensure all classes are represented.")
-            stratify = False
-        else:
-            logger.info("All classes have sufficient samples for stratification.")
-            for target, dist in class_distributions.items():
-                logger.info(f"\nClass distribution for {target}:")
-                for val, count in dist.items():
-                    logger.info(f"  Class {val}: {count} samples ({count/len(data):.1%})")
+    # Get all feature columns (columns that are not targets)
+    feature_columns = [col for col in data.columns if col not in target_columns]
     
-    # Perform the splits
-    try:
-        # First split: separate test set
-        logger.info("\nSplitting data into train+val and test sets")
-        if stratify:
-            strat_groups = create_balanced_groups(data, target_columns)
-        else:
-            strat_groups = None
-            
-        train_val_data, test_data = train_test_split(
-            data,  # Keep all columns together
-            test_size=test_size,
-            random_state=random_state,
-            stratify=strat_groups
-        )
-        
-        # Second split: separate validation set from training set
-        logger.info("Splitting train+val into train and validation sets")
-        val_size_adjusted = val_size / (1 - test_size)
-        
-        if stratify:
-            strat_groups_train = create_balanced_groups(train_val_data, target_columns)
-        else:
-            strat_groups_train = None
-        
-        train_data, val_data = train_test_split(
-            train_val_data,  # Keep all columns together
-            test_size=val_size_adjusted,
-            random_state=random_state,
-            stratify=strat_groups_train
-        )
-        
-    except ValueError as e:
-        logger.warning(f"\nEncountered an error during stratified split: {str(e)}")
-        logger.warning("Falling back to random splitting...")
-        
-        train_val_data, test_data = train_test_split(
-            data,
-            test_size=test_size,
-            random_state=random_state
-        )
-        
-        val_size_adjusted = val_size / (1 - test_size)
-        train_data, val_data = train_test_split(
-            train_val_data,
-            test_size=val_size_adjusted,
-            random_state=random_state
-        )
-
-    # Save datasets for each target separately
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     
+    # Process each target independently
     for target in target_columns:
+        logger.info(f"\nProcessing target: {target}")
+        
         # Create target-specific directory
         target_dir = output_path / target
         target_dir.mkdir(parents=True, exist_ok=True)
         
-        # Save complete datasets (features + target)
+        # Get feature columns excluding all target columns
+        feature_columns = [col for col in data.columns if col not in target_columns]
+        
+        # Check class distribution for current target
+        value_counts = data[target].value_counts()
+        can_stratify = True
+        
+        if stratify:
+            logger.info(f"Checking class distribution for {target}...")
+            
+            # Check if any class has less than 2 samples
+            if value_counts.min() < 2:
+                logger.warning(f"Target '{target}' has classes with insufficient samples:")
+                for val, count in value_counts.items():
+                    logger.warning(f"  Class {val}: {count} samples")
+                can_stratify = False
+                logger.warning("Disabling stratification for this target due to insufficient samples.")
+        
+        # Log original distribution
+        logger.info("\nOriginal class distribution:")
+        for val, count in value_counts.items():
+            logger.info(f"  Class {val}: {count} samples ({count/len(data):.1%})")
+    
+        # Prepare data for this target
+        X = data[feature_columns]
+        y = data[target]
+        
+        
+            
+        try:
+            # First split: separate test set
+            logger.info(f"\nSplitting data for {target} into train+val and test sets")
+            X_train_val, X_test, y_train_val, y_test = train_test_split(
+                X, y,
+                test_size=test_size,
+                random_state=random_state,
+                stratify=y if can_stratify and stratify else None
+            )
+            
+            # Second split: separate validation set from training set
+            logger.info(f"Splitting train+val for {target} into train and validation sets")
+            val_size_adjusted = val_size / (1 - test_size)
+            X_train, X_val, y_train, y_val = train_test_split(
+                X_train_val, y_train_val,
+                test_size=val_size_adjusted,
+                random_state=random_state,
+                stratify=y_train_val if can_stratify and stratify else None
+            )
+            
+            # Verify class distributions
+            logger.info("\nVerifying class distributions across splits:")
+            
+            # Calculate distributions
+            original_dist = y.value_counts(normalize=True)
+            train_dist = y_train.value_counts(normalize=True)
+            val_dist = y_val.value_counts(normalize=True)
+            test_dist = y_test.value_counts(normalize=True)
+            
+            # Compare distributions
+            logger.info("\nClass distribution comparison:")
+            logger.info("Class | Original | Train   | Val     | Test    | Max Diff")
+            logger.info("-" * 60)
+            
+            max_diff = 0
+            for cls in original_dist.index:
+                orig_pct = original_dist[cls] * 100
+                train_pct = train_dist[cls] * 100
+                val_pct = val_dist[cls] * 100
+                test_pct = test_dist[cls] * 100
+                
+                # Calculate maximum difference from original
+                diff = max(abs(train_pct - orig_pct), 
+                          abs(val_pct - orig_pct), 
+                          abs(test_pct - orig_pct))
+                max_diff = max(max_diff, diff)
+                
+                logger.info(f"{cls:5d} | {orig_pct:7.1f}% | {train_pct:7.1f}% | {val_pct:7.1f}% | {test_pct:7.1f}% | {diff:7.1f}%")
+            
+            # Check if stratification was successful
+            if stratify and can_stratify:
+                if max_diff > 5:  # More than 5% difference
+                    logger.warning(f"\nWARNING: Large class distribution differences detected (max diff: {max_diff:.1f}%)")
+                    logger.warning("This might indicate stratification issues.")
+                else:
+                    logger.info(f"\nStratification successful. Maximum distribution difference: {max_diff:.1f}%")
+            
+        except ValueError as e:
+            logger.warning(f"\nEncountered an error during stratified split for {target}: {str(e)}")
+            logger.warning("Falling back to random splitting...")
+            
+            X_train_val, X_test, y_train_val, y_test = train_test_split(
+                X, y,
+                test_size=test_size,
+                random_state=random_state
+            )
+            
+            val_size_adjusted = val_size / (1 - test_size)
+            X_train, X_val, y_train, y_val = train_test_split(
+                X_train_val, y_train_val,
+                test_size=val_size_adjusted,
+                random_state=random_state
+            )
+
+        # Reconstruct full DataFrames for each split
+        train_data = pd.concat([X_train, y_train], axis=1)
+        val_data = pd.concat([X_val, y_val], axis=1)
+        test_data = pd.concat([X_test, y_test], axis=1)
+        
+        # Save datasets
         train_data.to_csv(target_dir / 'train.csv', index=False)
         val_data.to_csv(target_dir / 'val.csv', index=False)
         test_data.to_csv(target_dir / 'test.csv', index=False)
         
-        # Also save feature and target lists for reference
-        feature_columns = [col for col in data.columns if col not in target_columns]
-        
         # Calculate and save class distributions
-        train_dist = train_data[target].value_counts(normalize=True).to_dict()
-        val_dist = val_data[target].value_counts(normalize=True).to_dict()
-        test_dist = test_data[target].value_counts(normalize=True).to_dict()
+        train_dist = y_train.value_counts(normalize=True).to_dict()
+        val_dist = y_val.value_counts(normalize=True).to_dict()
+        test_dist = y_test.value_counts(normalize=True).to_dict()
         
         # Save split information
         split_info = {
@@ -181,8 +219,9 @@ def split_data(
             'val_ratio': len(val_data) / len(data),
             'test_ratio': len(test_data) / len(data),
             'random_state': random_state,
-            'stratified': stratify,
+            'stratified': stratify and can_stratify,
             'class_distribution': {
+                'original': y.value_counts(normalize=True).to_dict(),
                 'train': train_dist,
                 'val': val_dist,
                 'test': test_dist
@@ -198,12 +237,6 @@ def split_data(
         logger.info(f"Training set: {len(train_data)} samples")
         logger.info(f"Validation set: {len(val_data)} samples")
         logger.info(f"Test set: {len(test_data)} samples")
-        
-        if not data[target].dtype.kind in 'ifc' or len(data[target].unique()) <= 10:
-            logger.info("\nClass distribution:")
-            logger.info("Training set:")
-            for cls, prop in train_dist.items():
-                logger.info(f"  Class {cls}: {prop:.1%}")
 
 def main():
     parser = argparse.ArgumentParser(description='Split data into train, validation, and test sets')

@@ -31,17 +31,19 @@ class RandomForestModel:
         feature_importances_: DataFrame of feature importances
     """
     
-    def __init__(self, params_file: Optional[str] = None, feature_selection_file: Optional[str] = None):
+    def __init__(self, params_file: Optional[str] = None, feature_selection_file: Optional[str] = None, **kwargs):
         """
         Initialize the Random Forest model.
         
         Args:
             params_file: Path to JSON file containing model parameters
             feature_selection_file: Path to CSV file containing pre-selected features
+            **kwargs: Direct model parameters to use instead of loading from file
         """
         self.model = None
         self.feature_names_ = None
-        self.params = self._load_params(params_file) if params_file else {}
+        # Use kwargs if provided, otherwise try to load from file
+        self.params = kwargs if kwargs else (self._load_params(params_file) if params_file else {})
         self.feature_importances_ = None
         self.best_threshold_ = None
         self.target_column_ = None
@@ -156,7 +158,7 @@ class RandomForestModel:
         logger.info(f"Calculated class weights: {class_weights}")
         return class_weights
     
-    def fit(self, X: pd.DataFrame, y: pd.Series, validation_data: Optional[Tuple[pd.DataFrame, pd.Series]] = None) -> 'RandomForestModel':
+    def fit(self, X: pd.DataFrame, y: pd.Series, test_data: Optional[Tuple[pd.DataFrame, pd.Series]] = None, validation_data: Optional[Tuple[pd.DataFrame, pd.Series]] = None) -> 'RandomForestModel':
         """
         Fit the random forest model with class weight balancing and optional validation
         
@@ -172,6 +174,9 @@ class RandomForestModel:
         # Store target column name
         self.target_column_ = y.name if hasattr(y, 'name') else None
         
+        # Ensure y is binary (0/1)
+        y = y.astype(int)
+        
         # Filter features
         X_filtered = self._filter_features(X, self.target_column_)
         
@@ -179,17 +184,105 @@ class RandomForestModel:
         if self.selected_features_ is None:
             self.feature_names_ = X_filtered.columns.tolist()
         
-        # Update parameters with class weights if not already specified
+        # Update parameters with class weights and regularization
         model_params = self.params.copy()
         if 'class_weight' not in model_params:
             model_params['class_weight'] = self._handle_class_weights(y)
         
-        # Set default parameters if not specified
-        model_params.setdefault('n_estimators', 100)
+        # # Set default parameters with stronger regularization
+        # model_params.setdefault('n_estimators', 200)  # Increased for stability
+        # model_params.setdefault('random_state', 42)
+        # model_params.setdefault('n_jobs', -1)
+        # model_params.setdefault('max_features', 'sqrt')
+        # model_params.setdefault('min_samples_leaf', 8)  # Increased for regularization
+        # model_params.setdefault('min_samples_split', 10)  # Added for regularization
+        # model_params.setdefault('max_depth', 15)  # Added depth limit
+        # model_params.setdefault('min_weight_fraction_leaf', 0.1)  # Added for regularization
+        
+        logger.info(f"Training Random Forest with parameters: {model_params}")
+        
+        # Initialize and train model
+        self.model = RandomForestClassifier(**model_params)
+        self.model.fit(X_filtered, y)
+        
+        # Calculate and log feature importances
+        self._calculate_feature_importances()
+        self._log_feature_importance(top_n=20)
+        
+        # # Evaluate on training set
+        # train_metrics, train_y_pred, train_y_pred_proba = self.evaluate(X_filtered, y, "Training")
+        # print("\n---train_metrics")
+        # print(train_metrics)
+        # print("\n---train_y_pred")
+        # print(train_y_pred)
+        # print("\n---train_y_pred_proba")
+        # print(train_y_pred_proba)
+        # logger.info("\nTraining Metrics:")
+        # for metric, value in train_metrics.items():
+        #     logger.info(f"{metric}: {value:.4f}")
+        
+        # # Evaluate on test set if provided
+        # if test_data is not None:
+        #     X_test, y_test = test_data
+        #     y_test = y_test.astype(int)  # Ensure test data is also binary
+        #     X_test_filtered = self._filter_features(X_test)  # No target_column needed here as we use stored features
+        #     test_metrics = self.evaluate(X_test_filtered, y_test, "Test")
+        #     logger.info("\nTest Metrics:")
+        #     for metric, value in test_metrics.items():
+        #         logger.info(f"{metric}: {value:.4f}")
+                
+        # # Evaluate on validation set if provided
+        # if validation_data is not None:
+        #     X_val, y_val = validation_data
+        #     y_val = y_val.astype(int)  # Ensure validation data is also binary
+        #     X_val_filtered = self._filter_features(X_val)  # No target_column needed here as we use stored features
+        #     val_metrics = self.evaluate(X_val_filtered, y_val, "Validation")
+        #     logger.info("\nValidation Metrics:")
+        #     for metric, value in val_metrics.items():
+        #         logger.info(f"{metric}: {value:.4f}")
+        
+        return self
+    
+    def fit_old(self, X: pd.DataFrame, y: pd.Series, test_data: Optional[Tuple[pd.DataFrame, pd.Series]] = None, validation_data: Optional[Tuple[pd.DataFrame, pd.Series]] = None) -> 'RandomForestModel':
+        """
+        Fit the random forest model with class weight balancing and optional validation
+        
+        Parameters:
+        -----------
+        X : DataFrame
+            Training features
+        y : Series
+            Target variable
+        validation_data : tuple, optional
+            (X_val, y_val) for monitoring performance during training
+        """
+        # Store target column name
+        self.target_column_ = y.name if hasattr(y, 'name') else None
+        
+        # Ensure y is binary (0/1)
+        y = y.astype(int)
+        
+        # Filter features
+        X_filtered = self._filter_features(X, self.target_column_)
+        
+        # Store feature names for prediction if not using pre-selected features
+        if self.selected_features_ is None:
+            self.feature_names_ = X_filtered.columns.tolist()
+        
+        # Update parameters with class weights and regularization
+        model_params = self.params.copy()
+        if 'class_weight' not in model_params:
+            model_params['class_weight'] = self._handle_class_weights(y)
+        
+        # Set default parameters with stronger regularization
+        model_params.setdefault('n_estimators', 200)  # Increased for stability
         model_params.setdefault('random_state', 42)
         model_params.setdefault('n_jobs', -1)
         model_params.setdefault('max_features', 'sqrt')
-        model_params.setdefault('min_samples_leaf', 4)  # More robust to noise
+        model_params.setdefault('min_samples_leaf', 8)  # Increased for regularization
+        model_params.setdefault('min_samples_split', 10)  # Added for regularization
+        model_params.setdefault('max_depth', 15)  # Added depth limit
+        model_params.setdefault('min_weight_fraction_leaf', 0.1)  # Added for regularization
         
         logger.info(f"Training Random Forest with parameters: {model_params}")
         
@@ -202,14 +295,31 @@ class RandomForestModel:
         self._log_feature_importance(top_n=20)
         
         # Evaluate on training set
-        train_metrics = self.evaluate(X_filtered, y, "Training")
+        train_metrics, train_y_pred, train_y_pred_proba = self.evaluate(X_filtered, y, "Training")
+        print("\n---train_metrics")
+        print(train_metrics)
+        print("\n---train_y_pred")
+        print(train_y_pred)
+        print("\n---train_y_pred_proba")
+        print(train_y_pred_proba)
         logger.info("\nTraining Metrics:")
         for metric, value in train_metrics.items():
             logger.info(f"{metric}: {value:.4f}")
         
+        # Evaluate on test set if provided
+        if test_data is not None:
+            X_test, y_test = test_data
+            y_test = y_test.astype(int)  # Ensure test data is also binary
+            X_test_filtered = self._filter_features(X_test)  # No target_column needed here as we use stored features
+            test_metrics = self.evaluate(X_test_filtered, y_test, "Test")
+            logger.info("\nTest Metrics:")
+            for metric, value in test_metrics.items():
+                logger.info(f"{metric}: {value:.4f}")
+                
         # Evaluate on validation set if provided
         if validation_data is not None:
             X_val, y_val = validation_data
+            y_val = y_val.astype(int)  # Ensure validation data is also binary
             X_val_filtered = self._filter_features(X_val)  # No target_column needed here as we use stored features
             val_metrics = self.evaluate(X_val_filtered, y_val, "Validation")
             logger.info("\nValidation Metrics:")
@@ -217,6 +327,7 @@ class RandomForestModel:
                 logger.info(f"{metric}: {value:.4f}")
         
         return self
+    
     
     def _calculate_feature_importances(self) -> None:
         """Calculate and store feature importances"""
@@ -314,7 +425,7 @@ class RandomForestModel:
         # Plot confusion matrix
         self.plot_confusion_matrix(y, y_pred, dataset_name)
         
-        return metrics
+        return y_pred, y_pred_proba, metrics
     
     def plot_confusion_matrix(self, y_true: pd.Series, y_pred: np.ndarray, dataset_name: str) -> None:
         """Plot confusion matrix"""
@@ -430,3 +541,10 @@ class RandomForestModel:
         logger.info("\nTop %d most important features:", top_n)
         for idx, row in importance_df.iterrows():
             logger.info(f"{row['feature']}: {row['importance']:.4f}")
+
+    @property
+    def estimator(self):
+        """Get the underlying scikit-learn estimator"""
+        if self.model is None:
+            raise ValueError("Model not trained yet")
+        return self.model
